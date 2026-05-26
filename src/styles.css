@@ -165,8 +165,7 @@ button {
 .secondary-button,
 .ghost-button,
 .file-button,
-.icon-button,
-.schema-row {
+.icon-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -236,6 +235,16 @@ button {
   align-items: flex-start;
   gap: 12px;
   margin-bottom: 18px;
+}
+
+.split-heading {
+  justify-content: space-between;
+}
+
+.heading-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
 }
 
 h1,
@@ -361,11 +370,17 @@ textarea:focus {
 
 .primary-button:disabled,
 .secondary-button:disabled,
+.ghost-button:disabled,
 .file-button.disabled,
 .icon-button:disabled {
   cursor: not-allowed;
   opacity: 0.56;
   transform: none;
+}
+
+.compact-button {
+  min-height: 36px;
+  padding: 7px 10px;
 }
 
 .action-row {
@@ -471,12 +486,34 @@ textarea:focus {
 
 .schema-row {
   width: 100%;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
   border: 1px solid var(--soft-line);
-  text-align: left;
 }
 
-.schema-row:hover {
+.schema-edit-button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-height: 46px;
+  padding: 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.schema-edit-button > div {
+  min-width: 0;
+}
+
+.schema-edit-button:hover {
   border-color: rgba(23, 107, 135, 0.28);
   background: #f2fbfd;
 }
@@ -586,6 +623,38 @@ textarea:focus {
   overflow-wrap: anywhere;
   color: #24324a;
   font-size: 0.88rem;
+}
+
+.quick-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.quick-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 38px;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: #526075;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.quick-action.active {
+  border-color: #bfe8d6;
+  background: #ecfff6;
+  color: var(--good);
+}
+
+.quick-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
 }
 
 .spin {

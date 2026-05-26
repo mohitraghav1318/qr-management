@@ -21,7 +21,7 @@ import {
 import { Html5Qrcode } from 'html5-qrcode';
 import QRCode from 'qrcode';
 import JSZip from 'jszip';
-import { get, onValue, push, ref, set, update } from 'firebase/database';
+import { get, onValue, push, ref, remove, set, update } from 'firebase/database';
 import { adminPasscode, database } from './firebase';
 
 const FIELD_TYPES = [
@@ -42,6 +42,11 @@ const EMPTY_FIELD = {
   required: false,
   options: '',
 };
+
+const MAX_PASSCODE_ATTEMPTS = 5;
+const PASSCODE_LOCK_MS = 30 * 60 * 1000;
+const PASSCODE_ATTEMPTS_KEY = 'event-qr-passcode-attempts';
+const PASSCODE_LOCK_UNTIL_KEY = 'event-qr-passcode-lock-until';
 
 function makeHash() {
   const bytes = new Uint8Array(18);
@@ -78,6 +83,53 @@ function downloadBlob(blob, filename) {
   anchor.click();
   anchor.remove();
   URL.revokeObjectURL(url);
+}
+
+function readStoredNumber(key) {
+  try {
+    return Number(localStorage.getItem(key)) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+function writeStoredNumber(key, value) {
+  try {
+    localStorage.setItem(key, String(value));
+  } catch {
+    // Browser storage can be unavailable in private modes.
+  }
+}
+
+function clearPasscodeRateLimit() {
+  try {
+    localStorage.removeItem(PASSCODE_ATTEMPTS_KEY);
+    localStorage.removeItem(PASSCODE_LOCK_UNTIL_KEY);
+  } catch {
+    // Ignore storage failures; the unlock flow still works in memory.
+  }
+}
+
+function getInitialPasscodeLimit() {
+  const now = Date.now();
+  const lockUntil = readStoredNumber(PASSCODE_LOCK_UNTIL_KEY);
+
+  if (lockUntil && lockUntil <= now) {
+    clearPasscodeRateLimit();
+    return { attempts: 0, lockUntil: 0 };
+  }
+
+  return {
+    attempts: readStoredNumber(PASSCODE_ATTEMPTS_KEY),
+    lockUntil,
+  };
+}
+
+function formatRemainingTime(milliseconds) {
+  const totalSeconds = Math.max(1, Math.ceil(milliseconds / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes ? `${minutes}m ${String(seconds).padStart(2, '0')}s` : `${seconds}s`;
 }
 
 function cleanScannedValue(value) {
@@ -281,15 +333,28 @@ function getUniqueImportFields(headers) {
     return {
       label,
       key: count ? `${baseKey}_${count + 1}` : baseKey,
-      type: 'text',
+      type: getImportedFieldType(label),
       required: false,
       options: '',
     };
   });
 }
 
+function getImportedFieldType(label) {
+  const key = normalizeKey(label);
+  const checkboxWords = ['entry', 'food', 'kit', 'check_in', 'checked_in', 'attendance', 'present', 'visited', 'served', 'collected'];
+  if (checkboxWords.includes(key) || key.startsWith('is_') || key.endsWith('_done') || key.endsWith('_received')) return 'checkbox';
+  return 'text';
+}
+
 function getImportLabelField(fields) {
   return fields.find((field) => ['label', 'lable'].includes(normalizeKey(field.label)));
+}
+
+function parseImportedValue(value, field) {
+  const text = String(value ?? '').trim();
+  if (field.type !== 'checkbox') return text;
+  return ['1', 'true', 'yes', 'y', 'done', 'checked', 'received'].includes(text.toLowerCase());
 }
 
 async function readTableFile(file) {
@@ -308,10 +373,10 @@ function getImportedRows(file, rows) {
 
   const dataRows = rows.slice(1).map((row) =>
     fields.reduce((details, field, index) => {
-      details[field.key] = String(row[index] ?? '').trim();
+      details[field.key] = parseImportedValue(row[index], field);
       return details;
     }, {}),
-  ).filter((details) => Object.values(details).some(Boolean));
+  ).filter((details) => Object.values(details).some((value) => value !== '' && value !== false));
 
   if (!dataRows.length) throw new Error('No data rows found after the header row.');
 
@@ -418,15 +483,48 @@ function App() {
 function UnlockPanel({ onUnlock }) {
   const [passcode, setPasscode] = useState('');
   const [error, setError] = useState('');
+  const [{ attempts, lockUntil }, setRateLimit] = useState(getInitialPasscodeLimit);
+  const [now, setNow] = useState(Date.now());
+  const isBlocked = lockUntil > now;
+
+  useEffect(() => {
+    if (!isBlocked) return undefined;
+    const interval = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, [isBlocked]);
 
   function submit(event) {
     event.preventDefault();
+    const currentTime = Date.now();
+
+    if (lockUntil > currentTime) {
+      setNow(currentTime);
+      setError(`Too many attempts. Try again in ${formatRemainingTime(lockUntil - currentTime)}.`);
+      return;
+    }
+
     if (!adminPasscode || passcode === adminPasscode) {
+      clearPasscodeRateLimit();
       sessionStorage.setItem('event-qr-unlocked', 'true');
       onUnlock();
       return;
     }
-    setError('Passcode did not match.');
+
+    const nextAttempts = attempts + 1;
+
+    if (nextAttempts >= MAX_PASSCODE_ATTEMPTS) {
+      const nextLockUntil = currentTime + PASSCODE_LOCK_MS;
+      writeStoredNumber(PASSCODE_ATTEMPTS_KEY, nextAttempts);
+      writeStoredNumber(PASSCODE_LOCK_UNTIL_KEY, nextLockUntil);
+      setRateLimit({ attempts: nextAttempts, lockUntil: nextLockUntil });
+      setNow(currentTime);
+      setError('Too many attempts. Try again in 30m 00s.');
+      return;
+    }
+
+    writeStoredNumber(PASSCODE_ATTEMPTS_KEY, nextAttempts);
+    setRateLimit({ attempts: nextAttempts, lockUntil: 0 });
+    setError(`Passcode did not match. ${MAX_PASSCODE_ATTEMPTS - nextAttempts} attempts left.`);
   }
 
   return (
@@ -449,11 +547,16 @@ function UnlockPanel({ onUnlock }) {
               value={passcode}
               onChange={(event) => setPasscode(event.target.value)}
               autoComplete="current-password"
+              disabled={isBlocked}
               autoFocus
             />
           </label>
-          {error && <p className="form-error">{error}</p>}
-          <button className="primary-button" type="submit">
+          {(error || isBlocked) && (
+            <p className="form-error">
+              {isBlocked ? `Too many attempts. Try again in ${formatRemainingTime(lockUntil - now)}.` : error}
+            </p>
+          )}
+          <button className="primary-button" type="submit" disabled={isBlocked}>
             <ShieldCheck size={18} />
             Unlock
           </button>
@@ -469,12 +572,16 @@ function Generator({ schemas, entries }) {
   const [quantity, setQuantity] = useState(10);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
+  const [clearRecentAt, setClearRecentAt] = useState(0);
 
   useEffect(() => {
     if (!schemaId && schemas.length) setSchemaId(schemas[0].id);
   }, [schemaId, schemas]);
 
   const selectedSchema = schemas.find((schema) => schema.id === schemaId);
+  const recentEntries = entries
+    .filter((entry) => (entry.updatedAt || entry.createdAt || 0) > clearRecentAt)
+    .slice(0, 5);
 
   async function generateBatch(event) {
     event.preventDefault();
@@ -697,18 +804,26 @@ function Generator({ schemas, entries }) {
       </section>
 
       <section className="panel">
-        <div className="section-heading">
-          <span className="icon-badge">
-            <QrCode size={18} />
-          </span>
+        <div className="section-heading split-heading">
+          <div className="heading-main">
+            <span className="icon-badge">
+              <QrCode size={18} />
+            </span>
+            <div>
+              <h2>Recent QR Entries</h2>
+              <p>Latest 5 activity items.</p>
+            </div>
+          </div>
           <div>
-            <h2>Recent QR Entries</h2>
-            <p>QR payloads are hashes only.</p>
+            <button className="ghost-button compact-button" type="button" onClick={() => setClearRecentAt(Date.now())} disabled={!recentEntries.length}>
+              <Trash2 size={16} />
+              Clear
+            </button>
           </div>
         </div>
 
         <div className="entry-list">
-          {entries.slice(0, 12).map((entry) => (
+          {recentEntries.map((entry) => (
             <article className="entry-row" key={entry.hash}>
               <div>
                 <strong>{entry.label || entry.hash.slice(0, 10)}</strong>
@@ -719,7 +834,7 @@ function Generator({ schemas, entries }) {
               </span>
             </article>
           ))}
-          {entries.length === 0 && <div className="empty-state">Generated entries will appear here.</div>}
+          {recentEntries.length === 0 && <div className="empty-state">Generated entries will appear here.</div>}
         </div>
       </section>
     </main>
@@ -736,6 +851,7 @@ function SchemaDesigner({ schemas }) {
   ]);
   const [editingId, setEditingId] = useState('');
   const [saving, setSaving] = useState(false);
+  const [deletingId, setDeletingId] = useState('');
   const [message, setMessage] = useState('');
 
   function resetForm() {
@@ -806,6 +922,24 @@ function SchemaDesigner({ schemas }) {
       setMessage(error.message || 'Could not save schema.');
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function deleteSchema(schema) {
+    const confirmed = window.confirm(`Delete "${schema.name}" schema? Existing QR entries will stay in Firebase.`);
+    if (!confirmed) return;
+
+    setDeletingId(schema.id);
+    setMessage('');
+
+    try {
+      await remove(ref(database, `schemas/${schema.id}`));
+      if (editingId === schema.id) resetForm();
+      setMessage('Schema deleted.');
+    } catch (error) {
+      setMessage(error.message || 'Could not delete schema.');
+    } finally {
+      setDeletingId('');
     }
   }
 
@@ -930,13 +1064,24 @@ function SchemaDesigner({ schemas }) {
         </div>
         <div className="schema-list">
           {schemas.map((schema) => (
-            <button className="schema-row" key={schema.id} type="button" onClick={() => editSchema(schema)}>
-              <div>
-                <strong>{schema.name}</strong>
-                <span>{schema.qrLabel || 'No QR label'} · {schema.fields?.length || 0} fields · {formatDate(schema.updatedAt)}</span>
-              </div>
-              <ChevronRight size={18} />
-            </button>
+            <article className="schema-row" key={schema.id}>
+              <button className="schema-edit-button" type="button" onClick={() => editSchema(schema)}>
+                <div>
+                  <strong>{schema.name}</strong>
+                  <span>{schema.qrLabel || 'No QR label'} · {schema.fields?.length || 0} fields · {formatDate(schema.updatedAt)}</span>
+                </div>
+                <ChevronRight size={18} />
+              </button>
+              <button
+                className="icon-button danger"
+                type="button"
+                aria-label={`Delete ${schema.name} schema`}
+                onClick={() => deleteSchema(schema)}
+                disabled={deletingId === schema.id}
+              >
+                {deletingId === schema.id ? <Loader2 className="spin" size={17} /> : <Trash2 size={17} />}
+              </button>
+            </article>
           ))}
           {schemas.length === 0 && <div className="empty-state">Create your first event schema.</div>}
         </div>
@@ -954,6 +1099,7 @@ function Scanner({ schemas }) {
   const [schema, setSchema] = useState(null);
   const [values, setValues] = useState({});
   const [message, setMessage] = useState('');
+  const quickFields = (schema?.fields || []).filter((field) => field.type === 'checkbox');
 
   useEffect(() => {
     return () => {
@@ -1099,6 +1245,39 @@ function Scanner({ schemas }) {
     }
   }
 
+  async function quickUpdateField(field) {
+    if (!entry || !schema) return;
+
+    const nextValue = !Boolean(values[field.key]);
+    const nextValues = { ...values, [field.key]: nextValue };
+
+    setBusy(true);
+    try {
+      const now = Date.now();
+      const historyId = push(ref(database, `scanHistory/${entry.hash}`)).key;
+      await update(ref(database), {
+        [`qrEntries/${entry.hash}/details/${field.key}`]: nextValue,
+        [`qrEntries/${entry.hash}/status`]: 'updated',
+        [`qrEntries/${entry.hash}/updatedAt`]: now,
+        [`qrEntries/${entry.hash}/lastScannedAt`]: now,
+        [`scanHistory/${entry.hash}/${historyId}`]: {
+          action: field.key,
+          label: field.label,
+          value: nextValue,
+          details: nextValues,
+          updatedAt: now,
+        },
+      });
+      setValues(nextValues);
+      setEntry((current) => ({ ...current, details: nextValues, status: 'updated', updatedAt: now, lastScannedAt: now }));
+      setMessage(`${field.label} ${nextValue ? 'marked' : 'unmarked'}.`);
+    } catch (error) {
+      setMessage(error.message || `Could not update ${field.label}.`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <main className="two-column scanner-layout">
       <section className="panel scanner-panel">
@@ -1154,6 +1333,26 @@ function Scanner({ schemas }) {
               <Hash size={16} />
               <code>{entry.hash}</code>
             </div>
+
+            {quickFields.length > 0 && (
+              <div className="quick-actions">
+                {quickFields.map((field) => {
+                  const active = Boolean(values[field.key]);
+                  return (
+                    <button
+                      key={field.key}
+                      type="button"
+                      className={`quick-action ${active ? 'active' : ''}`}
+                      onClick={() => quickUpdateField(field)}
+                      disabled={busy}
+                    >
+                      <Check size={16} />
+                      {field.label}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
 
             {(schema.fields || []).map((field) => (
               <FieldInput key={field.key} field={field} value={values[field.key]} onChange={(value) => updateValue(field.key, value)} />
