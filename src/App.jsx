@@ -1098,6 +1098,8 @@ function Scanner({ schemas }) {
   const [entry, setEntry] = useState(null);
   const [schema, setSchema] = useState(null);
   const [values, setValues] = useState({});
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [pendingUpdate, setPendingUpdate] = useState(false);
   const [message, setMessage] = useState('');
   const quickFields = (schema?.fields || []).filter((field) => field.type === 'checkbox');
 
@@ -1116,6 +1118,11 @@ function Scanner({ schemas }) {
   }
 
   async function startScanner() {
+    if (pendingUpdate) {
+      setDetailsOpen(true);
+      setMessage('Update the current entry before scanning another QR.');
+      return;
+    }
     setMessage('');
     try {
       if (!scannerRef.current) scannerRef.current = new Html5Qrcode('qr-reader');
@@ -1140,6 +1147,12 @@ function Scanner({ schemas }) {
   async function scanFile(event) {
     const file = event.target.files?.[0];
     if (!file) return;
+    if (pendingUpdate) {
+      setDetailsOpen(true);
+      setMessage('Update the current entry before scanning another QR.');
+      event.target.value = '';
+      return;
+    }
     setMessage('');
     try {
       if (!scannerRef.current) scannerRef.current = new Html5Qrcode('qr-reader');
@@ -1153,6 +1166,12 @@ function Scanner({ schemas }) {
   }
 
   async function loadEntry(rawValue = hash) {
+    if (pendingUpdate) {
+      setDetailsOpen(true);
+      setMessage('Update the current entry before scanning another QR.');
+      return;
+    }
+
     const hashCandidates = getScannedHashCandidates(rawValue);
     if (!hashCandidates.length) return;
     setBusy(true);
@@ -1180,6 +1199,8 @@ function Scanner({ schemas }) {
         setEntry(null);
         setSchema(null);
         setValues({});
+        setPendingUpdate(false);
+        setDetailsOpen(false);
         setMessage('Fake QR');
         return;
       }
@@ -1196,6 +1217,8 @@ function Scanner({ schemas }) {
       setEntry(loadedEntry);
       setSchema(loadedSchema);
       setValues(loadedEntry.details || {});
+      setPendingUpdate(Boolean(loadedSchema));
+      setDetailsOpen(Boolean(loadedSchema));
       setMessage(loadedSchema ? 'Entry loaded.' : 'Entry loaded, but schema is missing.');
     } catch (error) {
       setMessage(error.message || 'Could not load entry.');
@@ -1237,6 +1260,8 @@ function Scanner({ schemas }) {
         },
       });
       setEntry((current) => ({ ...current, details: values, status: 'updated', updatedAt: now, lastScannedAt: now }));
+      setPendingUpdate(false);
+      setDetailsOpen(false);
       setMessage('Entry updated.');
     } catch (error) {
       setMessage(error.message || 'Could not update entry.');
@@ -1270,7 +1295,9 @@ function Scanner({ schemas }) {
       });
       setValues(nextValues);
       setEntry((current) => ({ ...current, details: nextValues, status: 'updated', updatedAt: now, lastScannedAt: now }));
-      setMessage(`${field.label} ${nextValue ? 'marked' : 'unmarked'}.`);
+      setPendingUpdate(false);
+      setDetailsOpen(false);
+      setMessage(`${field.label} ${nextValue ? 'marked' : 'unmarked'}. Ready for next scan.`);
     } catch (error) {
       setMessage(error.message || `Could not update ${field.label}.`);
     } finally {
@@ -1279,6 +1306,7 @@ function Scanner({ schemas }) {
   }
 
   return (
+    <>
     <main className="two-column scanner-layout">
       <section className="panel scanner-panel">
         <div className="section-heading">
@@ -1294,20 +1322,20 @@ function Scanner({ schemas }) {
         <div id="qr-reader" className="qr-reader" />
 
         <div className="action-row scan-actions">
-          <button type="button" className="primary-button" onClick={running ? stopScanner : startScanner}>
+          <button type="button" className="primary-button" onClick={running ? stopScanner : startScanner} disabled={!running && pendingUpdate}>
             <ScanLine size={18} />
             {running ? 'Stop camera' : 'Start camera'}
           </button>
-          <label className="file-button">
-            <input type="file" accept="image/*" onChange={scanFile} />
+          <label className={`file-button ${pendingUpdate ? 'disabled' : ''}`}>
+            <input type="file" accept="image/*" onChange={scanFile} disabled={pendingUpdate} />
             <QrCode size={18} />
             Image
           </label>
         </div>
 
         <div className="manual-load">
-          <input value={hash} onChange={(event) => setHash(event.target.value)} placeholder="Hash code" />
-          <button type="button" className="secondary-button" onClick={() => loadEntry(hash)} disabled={busy}>
+          <input value={hash} onChange={(event) => setHash(event.target.value)} placeholder="Hash code" disabled={pendingUpdate} />
+          <button type="button" className="secondary-button" onClick={() => loadEntry(hash)} disabled={busy || pendingUpdate}>
             {busy ? <Loader2 className="spin" size={18} /> : <ChevronRight size={18} />}
             Load
           </button>
@@ -1323,11 +1351,31 @@ function Scanner({ schemas }) {
           </span>
           <div>
             <h2>{entry ? entry.label || entry.hash : 'Entry Details'}</h2>
-            <p>{entry ? `${entry.schemaName || 'Schema'} · ${entry.entityType}` : 'No hash loaded.'}</p>
+            <p>{pendingUpdate ? 'Update required before next scan.' : entry ? `${entry.schemaName || 'Schema'} · ${entry.entityType}` : 'No hash loaded.'}</p>
           </div>
         </div>
 
         {entry && schema ? (
+          <div className="empty-state">Entry details are open in the pop-up.</div>
+        ) : (
+          <div className="empty-state">Scan or load a hash to edit details.</div>
+        )}
+      </section>
+    </main>
+
+    {entry && schema && detailsOpen && (
+      <div className="modal-backdrop" role="presentation">
+        <section className="entry-modal" role="dialog" aria-modal="true" aria-labelledby="entry-modal-title">
+          <div className="section-heading">
+            <span className="icon-badge">
+              <Save size={18} />
+            </span>
+            <div>
+              <h2 id="entry-modal-title">{entry.label || entry.hash}</h2>
+              <p>{entry.schemaName || 'Schema'} · {entry.entityType}</p>
+            </div>
+          </div>
+
           <form className="form-stack" onSubmit={saveEntry}>
             <div className="hash-strip">
               <Hash size={16} />
@@ -1363,11 +1411,10 @@ function Scanner({ schemas }) {
               Update entry
             </button>
           </form>
-        ) : (
-          <div className="empty-state">Scan or load a hash to edit details.</div>
-        )}
-      </section>
-    </main>
+        </section>
+      </div>
+    )}
+    </>
   );
 }
 

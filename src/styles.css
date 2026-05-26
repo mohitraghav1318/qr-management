@@ -657,6 +657,27 @@ textarea:focus {
   opacity: 0.58;
 }
 
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(17, 24, 39, 0.48);
+}
+
+.entry-modal {
+  width: min(100%, 620px);
+  max-height: min(88vh, 760px);
+  overflow: auto;
+  border: 1px solid var(--soft-line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 18px;
+  box-shadow: 0 24px 60px rgba(20, 31, 48, 0.28);
+}
+
 .spin {
   animation: spin 1s linear infinite;
 }
